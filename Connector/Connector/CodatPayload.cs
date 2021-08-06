@@ -1,5 +1,4 @@
 using System;
-using Newtonsoft.Json;
 
 namespace Connector
 {
@@ -9,8 +8,11 @@ namespace Connector
         public string Kind { get; init; }
         public DateTimeOffset Timestamp { get; } = DateTimeOffset.Now;
         public string Json { get; init; }
-        
-        [JsonIgnore]
+        public TimeSpan Duration { get; init; }
+        public int PageCount { get; init; }
         public string Size => Json.Length.ToString("N0");
+
+        public override string ToString()
+            => $"{Kind} ({Size} bytes) downloaded in {Duration.TotalMilliseconds:N0}ms, but may have been compressed by the remote server";
     }
 }

@@ -14,32 +14,16 @@ namespace Connector
     {
         // 36eadd34-0006-4db1-9cd5-3cb9dd38618a -- atwell enterprises
         private readonly HttpClient _codatClient;
+        private readonly JsonSerializerSettings _jsonSettings;
         private readonly Dictionary<Guid, Guid> _companyIdsToConnectionIds;
         private readonly SemaphoreSlim _companyIdsToConnectionIdsLock = new(1, 1);
-        private readonly Dictionary<Guid, List<Guid>> _bankAccountsByCompany;
-        private readonly SemaphoreSlim _bankAccountsByCompanyLock = new(1, 1);
 
-        public CodatClient(HttpClient codatClient)
+        public CodatClient(HttpClient codatClient, JsonSerializerSettings jsonSettings)
         {
-            _codatClient = codatClient;
+            _codatClient = codatClient ?? throw new ArgumentNullException(nameof(codatClient));
+            _jsonSettings = jsonSettings ?? throw new ArgumentNullException(nameof(jsonSettings));
             _companyIdsToConnectionIds = new Dictionary<Guid, Guid>();
-            _bankAccountsByCompany = new Dictionary<Guid, List<Guid>>();
         }
-
-        // bills
-        // bank transactions
-        // chart of accounts
-        // company
-        // credit notes
-        // customers
-        // invoices
-        // payments
-        // profit and loss
-        // suppliers
-        // journal entries
-        // bill payment
-        // tax rates
-        // items
 
         public async Task<ICollection<CodatPayload>> GetPayloadsAsync(Guid companyId, CancellationToken ct)
         {
@@ -94,7 +78,7 @@ namespace Connector
             
             // /companies/{companyId}/data/bankAccounts/{accountId}/transactions
             var accountResults = await GetPaginatedResultsAsync<BankAccountContainer, BankAccount>(companyId, kind, baseUrl, ct);
-            var bankAccountContainer = JsonConvert.DeserializeObject<BankAccountContainer>(accountResults.Json);
+            var bankAccountContainer = JsonConvert.DeserializeObject<BankAccountContainer>(accountResults.Json, _jsonSettings);
             var bankAccounts = bankAccountContainer.Results.Where(r => r.IsBankAccount).ToList();
             bankAccountContainer.Results.Clear();
             bankAccountContainer.Results.AddRange(bankAccounts);
@@ -102,7 +86,9 @@ namespace Connector
             {
                 CodatId = companyId,
                 Kind = kind,
-                Json = JsonConvert.SerializeObject(bankAccountContainer),
+                Json = JsonConvert.SerializeObject(bankAccountContainer, _jsonSettings),
+                Duration = accountResults.Duration,
+                PageCount = accountResults.PageCount,
             };
         }
 
@@ -158,7 +144,7 @@ namespace Connector
             const string kind = "BankTransactions";
             var connectionId = await GetConnectionIdAsync(companyId, ct);
             var bankAcctPayloads = await GetBankAccounts(companyId, ct);
-            var deserializedBankAccounts = JsonConvert.DeserializeObject<BankAccountContainer>(bankAcctPayloads.Json);
+            var deserializedBankAccounts = JsonConvert.DeserializeObject<BankAccountContainer>(bankAcctPayloads.Json, _jsonSettings);
             var transactionsQueries = deserializedBankAccounts.Results
                 .Select(a => a.Id)
                 .Select(accountId =>
@@ -172,9 +158,9 @@ namespace Connector
             var consolidated = transactionsQueries
                 .Where(q => q.IsCompletedSuccessfully)
                 .Select(r => r.Result.Json)
-                .Select(j => JsonConvert.DeserializeObject<BankTransactionContainer>(j))
+                .Select(j => JsonConvert.DeserializeObject<BankTransactionContainer>(j, _jsonSettings))
                 .ToList();
-            var serialized = JsonConvert.SerializeObject(consolidated);
+            var serialized = JsonConvert.SerializeObject(consolidated, _jsonSettings);
             return new CodatPayload
             {
                 CodatId = companyId,
@@ -257,7 +243,7 @@ namespace Connector
             return results;
         }
 
-        private async Task<Guid> GetConnectionIdAsync(Guid companyId, CancellationToken ct)
+        public async Task<Guid> GetConnectionIdAsync(Guid companyId, CancellationToken ct)
         {
             try
             {
@@ -272,7 +258,7 @@ namespace Connector
                 {
                     resp.EnsureSuccessStatusCode();
                     var json = await resp.Content.ReadAsStringAsync(ct);
-                    var codatIntegration = JsonConvert.DeserializeObject<AccountingIntegration>(json);
+                    var codatIntegration = JsonConvert.DeserializeObject<AccountingIntegration>(json, _jsonSettings);
                     var accountingConnection = codatIntegration.DataConnections
                         .Single(c => string.Equals(c.SourceType, "Accounting", StringComparison.OrdinalIgnoreCase));
 
@@ -314,18 +300,22 @@ namespace Connector
             var next = $"{baseUrlSlug}{separator}pageSize={maxPageSize}&page=1";
 
             var containers = new List<T>();
+            var pages = 0;
+            var timer = Stopwatch.StartNew();
             while (!string.IsNullOrEmpty(next))
             {
+                pages++;
                 using (var resp = await _codatClient.GetAsync(next, HttpCompletionOption.ResponseHeadersRead, ct))
                 {
                     resp.EnsureSuccessStatusCode();
                     var json = await resp.Content.ReadAsStringAsync(ct);
-                    var deserialized = JsonConvert.DeserializeObject<T>(json);
+                    var deserialized = JsonConvert.DeserializeObject<T>(json, _jsonSettings);
                     containers.Add(deserialized);
                     next = deserialized.Links?.Next?.Link;
                 }
             }
-            
+            timer.Stop();
+
             var collector = containers.First();
             if (containers.Count > 1)
             {
@@ -341,21 +331,27 @@ namespace Connector
             {
                 CodatId = companyId,
                 Kind = kind,
-                Json = JsonConvert.SerializeObject(collector),
+                Json = JsonConvert.SerializeObject(collector, _jsonSettings),
+                PageCount = pages,
+                Duration = timer.Elapsed,
             };
         }
 
         private async Task<CodatPayload> DownloadPayloadAsync(Guid companyId, string url, string kind, CancellationToken ct)
         {
+            var timer = Stopwatch.StartNew();
             using (var resp = await _codatClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct))
             {
                 resp.EnsureSuccessStatusCode();
                 var json = await resp.Content.ReadAsStringAsync(ct);
+                timer.Stop();
                 return new CodatPayload
                 {
                     CodatId = companyId,
                     Kind = kind,
                     Json = json,
+                    PageCount = 1,
+                    Duration = timer.Elapsed,
                 };
             }
         }
