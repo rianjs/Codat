@@ -4,15 +4,15 @@ using Newtonsoft.Json;
 
 namespace Connector.CodatTypes
 {
-    // Root myDeserializedClass = JsonConvert.DeserializeObject<Root>(myJsonResponse); 
     internal class BankTransaction
     {
         public string Id { get; init; }
-        public string AccountName { get; init; }
-        public string NominalCode { get; init; }
-        public string Currency { get; init; }
+        public DateTime Date { get; init; }
+        public string Description { get; init; }
+        public bool Reconciled { get; init; }
+        public decimal Amount { get; init; }
         public decimal Balance { get; init; }
-        public decimal AvailableBalance { get; init; }
+        public string TransactionType { get; init; }
         public DateTime ModifiedDate { get; init; }
         public DateTime SourceModifiedDate { get; init; }
     }
@@ -27,4 +27,6 @@ namespace Connector.CodatTypes
         [JsonProperty("_links")]
         public Links Links { get; init; }
     }
+
+
 }

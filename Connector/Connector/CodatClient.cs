@@ -6,27 +6,35 @@ using System.Net.Http;
 using System.Threading;
 using System.Threading.Tasks;
 using Connector.CodatTypes;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 
 namespace Connector
 {
-    public class CodatClient
+    public class CodatClient : IAccountingDataReader
     {
-        // 36eadd34-0006-4db1-9cd5-3cb9dd38618a -- atwell enterprises
+        private readonly int _lookbackMonths;
         private readonly HttpClient _codatClient;
         private readonly JsonSerializerSettings _jsonSettings;
         private readonly Dictionary<Guid, Guid> _companyIdsToConnectionIds;
         private readonly SemaphoreSlim _companyIdsToConnectionIdsLock = new(1, 1);
+        private readonly ILogger<IAccountingDataReader> _log;
 
-        public CodatClient(HttpClient codatClient, JsonSerializerSettings jsonSettings)
+        public CodatClient(int lookbackMonths, HttpClient codatClient, JsonSerializerSettings jsonSettings, ILogger<IAccountingDataReader> log)
         {
+            _lookbackMonths = lookbackMonths < 1
+                ? throw new ArgumentOutOfRangeException($"{nameof(lookbackMonths)} should be a positive integer, usually 24-26 months")
+                : lookbackMonths;
             _codatClient = codatClient ?? throw new ArgumentNullException(nameof(codatClient));
             _jsonSettings = jsonSettings ?? throw new ArgumentNullException(nameof(jsonSettings));
+            _log = log ?? throw new ArgumentNullException(nameof(log));
+            
             _companyIdsToConnectionIds = new Dictionary<Guid, Guid>();
         }
 
-        public async Task<ICollection<CodatPayload>> GetPayloadsAsync(Guid companyId, CancellationToken ct)
+        public async Task<ICollection<CodatPayload>> GetAllDataAsync(Guid companyId, CancellationToken ct)
         {
+            _log.LogInformation($"Beginning payload ingestion for company id {companyId}");
             var timer = Stopwatch.StartNew();
             var payloadTasks = new List<Task<CodatPayload>>
             {
@@ -37,11 +45,12 @@ namespace Connector
                 GetCompanyInfoAsync(companyId, ct),
                 GetCreditNotesAsync(companyId, ct),
                 GetCustomersAsync(companyId, ct),
-                // GetBankTransactionsAsync(companyId, ct),
+                GetBankTransactionsAsync(companyId, ct),
                 GetInvoicesAsync(companyId, ct),
+                GetItemsAsync(companyId, ct),
                 GetPaymentsAsync(companyId, ct),
                 GetProfitAndLossAsync(companyId, ct),
-                // GetJournalEntriesAsync(companyId, ct),
+                GetJournalEntriesAsync(companyId, ct),
                 GetSuppliersAsync(companyId, ct),
                 GetBillPaymentsAsync(companyId, ct),
                 GetTaxRatesAsync(companyId, ct),
@@ -49,9 +58,14 @@ namespace Connector
 
             await Task.WhenAll(payloadTasks);
             timer.Stop();
-            
-            Console.WriteLine($"Downloading data took {timer.ElapsedMilliseconds:N0} ms");
+            _log.LogInformation($"All payloads for company id {companyId} ingested in {timer.ElapsedMilliseconds:N0}ms");
 
+            var failedDownloadCount = payloadTasks.Count(t => !t.IsCompletedSuccessfully);
+            if (failedDownloadCount > 0)
+            {
+                _log.LogError($"{failedDownloadCount} payloads were not ingested");
+            }
+            
             var results = payloadTasks
                 .Where(t => t.IsCompletedSuccessfully)
                 .Select(t => t.Result)
@@ -63,10 +77,16 @@ namespace Connector
         {
             const string kind = "BalanceSheet";
             const int periodLength = 30;
-            const int periodsToCompare = 12;
-            var url = $"/companies/{companyId}/data/financials/balanceSheet?periodLength={periodLength}&periodsToCompare={periodsToCompare}";
-
-            return await DownloadPayloadAsync(companyId, url, kind, ct);
+            var baseUrl = $"/companies/{companyId}/data/financials/balanceSheet?periodLength={periodLength}&periodsToCompare={_lookbackMonths}";
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await DownloadPayloadAsync(companyId, baseUrl, kind, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetBankAccounts(Guid companyId, CancellationToken ct)
@@ -76,96 +96,138 @@ namespace Connector
 
             var baseUrl = $"/companies/{companyId}/connections/{connectionId}/data/bankAccounts";
             
-            // /companies/{companyId}/data/bankAccounts/{accountId}/transactions
-            var accountResults = await GetPaginatedResultsAsync<BankAccountContainer, BankAccount>(companyId, kind, baseUrl, ct);
-            var bankAccountContainer = JsonConvert.DeserializeObject<BankAccountContainer>(accountResults.Json, _jsonSettings);
-            var bankAccounts = bankAccountContainer.Results.Where(r => r.IsBankAccount).ToList();
-            bankAccountContainer.Results.Clear();
-            bankAccountContainer.Results.AddRange(bankAccounts);
-            return new CodatPayload
-            {
-                CodatId = companyId,
-                Kind = kind,
-                Json = JsonConvert.SerializeObject(bankAccountContainer, _jsonSettings),
-                Duration = accountResults.Duration,
-                PageCount = accountResults.PageCount,
-            };
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<BankAccountContainer, BankAccount>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetBillsAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "Bills";
-            
             var baseUrl = $"/companies/{companyId}/data/bills";
-            var billContainer = await GetPaginatedResultsAsync<BillContainer, Bill>(companyId, kind, baseUrl, ct);
-
-            return billContainer;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<BillContainer, Bill>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetChartOfAccountsAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "ChartOfAccounts";
             var baseUrl = $"/companies/{companyId}/data/accounts";
-
-            var accounts = await GetPaginatedResultsAsync<AccountsContainer, Account>(companyId, kind, baseUrl, ct);
-            return accounts;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<AccountsContainer, Account>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetCompanyInfoAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "CompanyInfo";
             var baseUrl = $"/companies/{companyId}/data/info";
-
-            var companyInfo = await DownloadPayloadAsync(companyId, baseUrl, kind, ct);
-            return companyInfo;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await DownloadPayloadAsync(companyId, baseUrl, kind, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetCreditNotesAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "CreditNotes";
             var baseUrl = $"/companies/{companyId}/data/creditNotes";
-
-            var creditNotes = await GetPaginatedResultsAsync<CreditNotesContainer, CreditNotes>(companyId, kind, baseUrl, ct);
-            return creditNotes;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<CreditNotesContainer, CreditNotes>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetCustomersAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "Customers";
             var baseUrl = $"/companies/{companyId}/data/customers";
-
-            var customers = await GetPaginatedResultsAsync<CustomersContainer, Customer>(companyId, kind, baseUrl, ct);
-            return customers;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<CustomersContainer, Customer>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
         
         public async Task<CodatPayload> GetBankTransactionsAsync(Guid companyId, CancellationToken ct)
         {
-            // TODO: Fix this
             const string kind = "BankTransactions";
-            var connectionId = await GetConnectionIdAsync(companyId, ct);
+            
+            _log.LogInformation($"Fetched bank account information for company id {companyId} so we can fetch transactions");
             var bankAcctPayloads = await GetBankAccounts(companyId, ct);
-            var deserializedBankAccounts = JsonConvert.DeserializeObject<BankAccountContainer>(bankAcctPayloads.Json, _jsonSettings);
+            _log.LogInformation($"Bank account information for company id {companyId} fetched, beginning transaction ingestion");
+            
+            var deserializedBankAccounts = CompressionUtils.FromJsonSerializedGzipBytes<BankAccountContainer>(bankAcctPayloads.GzipJson, _jsonSettings);
             var transactionsQueries = deserializedBankAccounts.Results
                 .Select(a => a.Id)
                 .Select(accountId =>
                 {
-                    var baseUrl = $"/companies/{companyId}/connections/{connectionId}/options/bankAccounts/{accountId}/bankTransactions";
-                    return GetPaginatedResultsAsync<BankTransactionContainer, BankTransaction>(companyId, kind, baseUrl, ct);
+                    var baseUrl = $"/companies/{companyId}/data/bankAccounts/{accountId}/transactions";
+                    return new KeyValuePair<string, Task<CodatPayload>>(accountId, GetPaginatedResultsAsync<BankTransactionContainer, BankTransaction>(companyId, kind, baseUrl, ct));
                 })
-                .ToList();
-            await Task.WhenAll(transactionsQueries);
+                .ToDictionary(q => q.Key, q => q.Value);
+            
+            try
+            {
+                await Task.WhenAll(transactionsQueries.Values);
+            }
+            catch (Exception e)
+            {
+                // bank transactions don't work for everything, and this is normal...
+            }
 
-            var consolidated = transactionsQueries
-                .Where(q => q.IsCompletedSuccessfully)
-                .Select(r => r.Result.Json)
-                .Select(j => JsonConvert.DeserializeObject<BankTransactionContainer>(j, _jsonSettings))
-                .ToList();
-            var serialized = JsonConvert.SerializeObject(consolidated, _jsonSettings);
+            var unsupportedAccounts = transactionsQueries.Where(q => !q.Value.IsCompletedSuccessfully);
+            foreach (var transaction in unsupportedAccounts)
+            {
+                _log.LogInformation($"Bank account {transaction.Key} for company id {companyId} does not support fetching transaction");
+            }
+
+            var transactionsByAccountId = transactionsQueries
+                .Where(q => q.Value.IsCompletedSuccessfully)
+                // BankTransactionContainers do not have account ids as part of their data structure
+                .Select(r => new KeyValuePair<string, BankTransactionContainer>(
+                    r.Key,
+                    CompressionUtils.FromJsonSerializedGzipBytes<BankTransactionContainer>(r.Value.Result.GzipJson, _jsonSettings)))
+                .ToDictionary(r => r.Key, r => r.Value);
+            
+            var serialized = CompressionUtils.ToJsonSerializedGzipBytes(transactionsByAccountId, _jsonSettings);
             return new CodatPayload
             {
                 CodatId = companyId,
                 Kind = kind,
-                Json = serialized,
+                GzipJson = serialized,
             };
         }
 
@@ -174,86 +236,141 @@ namespace Connector
             const string kind = "Invoices";
             var baseUrl = $"/companies/{companyId}/data/invoices";
 
-            var customers = await GetPaginatedResultsAsync<InvoicesContainer, Invoice>(companyId, kind, baseUrl, ct);
-            return customers;
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<InvoicesContainer, Invoice>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetPaymentsAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "Payments";
             var baseUrl = $"/companies/{companyId}/data/payments";
-
-            var payments = await GetPaginatedResultsAsync<PaymentsContainer, Payment>(companyId, kind, baseUrl, ct);
-            return payments;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<PaymentsContainer, Payment>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetProfitAndLossAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "ProfitAndLoss";
-            var baseUrl = $"/companies/{companyId}/data/financials/profitAndLoss?periodLength=30&periodsToCompare=12";
-
-            var payload = await DownloadPayloadAsync(companyId, baseUrl, kind, ct);
-            return payload;
+            var baseUrl = $"/companies/{companyId}/data/financials/profitAndLoss?periodLength=30&periodsToCompare={_lookbackMonths}";
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await DownloadPayloadAsync(companyId, baseUrl, kind, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetSuppliersAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "Suppliers";
             var baseUrl = $"/companies/{companyId}/data/suppliers";
-
-            var results = await GetPaginatedResultsAsync<SupplierContainer, Supplier>(companyId, kind, baseUrl, ct);
-            return results;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<SupplierContainer, Supplier>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
         
         public async Task<CodatPayload> GetJournalEntriesAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "JournalEntries";
             var baseUrl = $"/companies/{companyId}/data/journalEntries";
-
-            // TODO: This API appears to be broken
-            throw new NotImplementedException();
-            // var results = await GetPaginatedResultsAsync<SupplierContainer, Supplier>(companyId, kind, baseUrl, ct);
-            // return results;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<JournalEntryContainer, JournalEntry>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetBillPaymentsAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "BillPayments";
             var baseUrl = $"/companies/{companyId}/data/billPayments";
-
-            var results = await GetPaginatedResultsAsync<BillPaymentContainer, BillPayment>(companyId, kind, baseUrl, ct);
-            return results;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<BillPaymentContainer, BillPayment>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<CodatPayload> GetTaxRatesAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "TaxRates";
             var baseUrl = $"/companies/{companyId}/data/taxRates";
-
-            var results = await GetPaginatedResultsAsync<TaxRateContainer, TaxRate>(companyId, kind, baseUrl, ct);
-            return results;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<TaxRateContainer, TaxRate>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
         
         public async Task<CodatPayload> GetItemsAsync(Guid companyId, CancellationToken ct)
         {
             const string kind = "Items";
             var baseUrl = $"/companies/{companyId}/data/items";
-
-            var results = await GetPaginatedResultsAsync<ItemContainer, Item>(companyId, kind, baseUrl, ct);
-            return results;
+            
+            _log.LogInformation($"{kind} ingestion for company id {companyId} beginning with url ' {baseUrl} '");
+            
+            var timer = Stopwatch.StartNew();
+            var result = await GetPaginatedResultsAsync<ItemContainer, Item>(companyId, kind, baseUrl, ct);
+            timer.Stop();
+            
+            _log.LogInformation($"{kind} ingestion completed for company id {companyId} completed in {timer.ElapsedMilliseconds:N0}ms");
+            return result;
         }
 
         public async Task<Guid> GetConnectionIdAsync(Guid companyId, CancellationToken ct)
         {
+            _log.LogInformation($"Getting the connection id for {companyId}");
+
+            var timer = Stopwatch.StartNew();
             try
             {
                 await _companyIdsToConnectionIdsLock.WaitAsync(ct);
+                timer.Stop();
+                _log.LogInformation($"Semaphore cache achieved in {timer.ElapsedMilliseconds:N0}ms for company id {companyId}");
                 if (_companyIdsToConnectionIds.TryGetValue(companyId, out var connectionId))
                 {
+                    _log.LogInformation($"Fetched the connection id for {companyId} from cache in {timer.ElapsedMilliseconds:N0}ms");
                     return connectionId;
                 }
                 
                 var url = $"/companies/{companyId}";
+                _log.LogInformation($"Connection id for company id {companyId} is not in the cache, fetching from origin with url ' {url} '");
+                
+                timer = Stopwatch.StartNew();
                 using (var resp = await _codatClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct))
                 {
                     resp.EnsureSuccessStatusCode();
@@ -264,6 +381,10 @@ namespace Connector
 
                     var guid = Guid.Parse(accountingConnection.Id);
                     _companyIdsToConnectionIds[companyId] = guid;
+                    
+                    timer.Stop();
+                    _log.LogInformation($"Fetched the connection id for company id {companyId} from origin and updated cache in {timer.ElapsedMilliseconds:N0}ms");
+                    
                     return guid;
                 }
             }
@@ -286,8 +407,6 @@ namespace Connector
             where T : IPaginated<U>
         {
             const int maxPageSize = 5_000;
-            // const int maxPageSize = 5;
-            const int firstPage = 1;
 
             if (string.IsNullOrWhiteSpace(baseUrlSlug))
                 throw new ArgumentNullException(nameof(baseUrlSlug));
@@ -296,25 +415,31 @@ namespace Connector
             if (baseUrlSlug.Contains("page=", StringComparison.OrdinalIgnoreCase))
                 throw new ArgumentException($"{nameof(baseUrlSlug)} should not have page number specified");
             
+            _log.LogInformation($"Ingesting paginated {kind} API for company id {companyId} with paginated url ' {baseUrlSlug} '");
+            
             var separator = baseUrlSlug.Contains("?") ? "&" : "?";
-            var next = $"{baseUrlSlug}{separator}pageSize={maxPageSize}&page=1";
-
+            var urlSlug = $"{baseUrlSlug}{separator}pageSize={maxPageSize}&page=1";
+            
             var containers = new List<T>();
             var pages = 0;
-            var timer = Stopwatch.StartNew();
-            while (!string.IsNullOrEmpty(next))
+            var payloadTimer = Stopwatch.StartNew();
+            while (!string.IsNullOrEmpty(urlSlug))
             {
                 pages++;
-                using (var resp = await _codatClient.GetAsync(next, HttpCompletionOption.ResponseHeadersRead, ct))
+                _log.LogInformation($"Ingested page {pages} of {kind} for company id {companyId} with url {urlSlug}");
+                
+                var pageTimer = Stopwatch.StartNew();
+                using (var resp = await _codatClient.GetAsync(urlSlug, HttpCompletionOption.ResponseHeadersRead, ct))
                 {
                     resp.EnsureSuccessStatusCode();
                     var json = await resp.Content.ReadAsStringAsync(ct);
                     var deserialized = JsonConvert.DeserializeObject<T>(json, _jsonSettings);
                     containers.Add(deserialized);
-                    next = deserialized.Links?.Next?.Link;
+                    urlSlug = deserialized.Links?.Next?.Link;
                 }
+                pageTimer.Stop();
+                _log.LogInformation($"Ingested page {pages} of {kind} for company id {companyId} with url {urlSlug} in {pageTimer.ElapsedMilliseconds:N0}ms");
             }
-            timer.Stop();
 
             var collector = containers.First();
             if (containers.Count > 1)
@@ -327,29 +452,37 @@ namespace Connector
                 collector.Results.AddRange(results);
             }
 
-            return new CodatPayload
+            var result = new CodatPayload
             {
                 CodatId = companyId,
                 Kind = kind,
-                Json = JsonConvert.SerializeObject(collector, _jsonSettings),
+                GzipJson = CompressionUtils.ToJsonSerializedGzipBytes(collector, _jsonSettings),
                 PageCount = pages,
-                Duration = timer.Elapsed,
+                Duration = payloadTimer.Elapsed,
             };
+            payloadTimer.Stop();
+            
+            _log.LogInformation($"Ingested paginated {kind} API for company id {companyId} with paginated url ' {baseUrlSlug} ' in {payloadTimer.ElapsedMilliseconds:N0}ms which had {pages:N0} pages");
+            return result;
         }
 
         private async Task<CodatPayload> DownloadPayloadAsync(Guid companyId, string url, string kind, CancellationToken ct)
         {
+            _log.LogInformation($"Ingesting {kind} API for company id {companyId} with url ' {url} '");
+            
             var timer = Stopwatch.StartNew();
             using (var resp = await _codatClient.GetAsync(url, HttpCompletionOption.ResponseHeadersRead, ct))
             {
                 resp.EnsureSuccessStatusCode();
                 var json = await resp.Content.ReadAsStringAsync(ct);
                 timer.Stop();
+                
+                _log.LogInformation($"Ingested {kind} API for company id {companyId} with url ' {url} ' in {timer.ElapsedMilliseconds:N0}ms");
                 return new CodatPayload
                 {
                     CodatId = companyId,
                     Kind = kind,
-                    Json = json,
+                    GzipJson = CompressionUtils.CompressString(json),
                     PageCount = 1,
                     Duration = timer.Elapsed,
                 };

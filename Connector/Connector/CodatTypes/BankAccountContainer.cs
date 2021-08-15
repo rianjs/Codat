@@ -7,19 +7,13 @@ namespace Connector.CodatTypes
     internal class BankAccount
     {
         public string Id { get; init; }
-        public string NominalCode { get; init; }
-        public string Name { get; init; }
-        public string Description { get; init; }
-        public string FullyQualifiedCategory { get; init; }
-        public string FullyQualifiedName { get; init; }
+        public string AccountName { get; init; }
         public string Currency { get; init; }
-        public decimal CurrentBalance { get; init; }
-        public string Type { get; init; }
-        public string Status { get; init; }
-        public bool IsBankAccount { get; init; }
+        public decimal Balance { get; init; }
+        public decimal AvailableBalance { get; init; }
         public DateTime ModifiedDate { get; init; }
         public DateTime SourceModifiedDate { get; init; }
-        public List<object> ValidDatatypeLinks { get; init; }
+        public string NominalCode { get; init; }
     }
 
     internal class BankAccountContainer : IPaginated<BankAccount>
@@ -32,4 +26,6 @@ namespace Connector.CodatTypes
         [JsonProperty("_links")]
         public Links Links { get; init; }
     }
+
+
 }

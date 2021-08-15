@@ -8,6 +8,7 @@ using System.Net.Http.Headers;
 using System.Reflection;
 using System.Threading;
 using System.Threading.Tasks;
+using Microsoft.Extensions.Logging;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
 using Newtonsoft.Json.Serialization;
@@ -36,23 +37,39 @@ namespace Connector
                 BaseAddress = new Uri("https://api.codat.io"),
                 DefaultRequestHeaders = { Authorization = GetBasicAuthHeader(prodToken),},
             };
-            var client = new CodatClient(codatHttpClient, jsonSettings);
+            var client = new CodatClient(26, codatHttpClient, jsonSettings, GetLogger<IAccountingDataReader>());
             
-            // CompanyId = 36eadd34-0006-4db1-9cd5-3cb9dd38618a
-            // ConnectionId = 783153fc-660d-477f-8016-75dba9b2ed1a
+            // download the data for client id
+            // Persist the data in gzip form to S3
 
-            var companyId = Guid.Parse("36eadd34-0006-4db1-9cd5-3cb9dd38618a");
-            var initialized = client.GetConnectionIdAsync(companyId, ct);
+            const string dmitry = "39b788e5-7190-4ffc-917b-4d3fe86b81b8";
+            const string rollingVideoGames = "ca545af7-392c-4890-b528-0b38dd37ee95";
 
-            // var bankTransactions = await client.GetBankTransactionsAsync(atwellGuid, ct);   // TODO: Fix
-            // var balanceSheet = await client.GetBalanceSheetAsync(companyId, ct);
-            var allPayloads = await client.GetPayloadsAsync(companyId, ct);
-            var contentSize = allPayloads.Sum(r => r.Json.Length).ToString("N0");
-            var serialized = JsonConvert.SerializeObject(allPayloads, jsonSettings);
-            var resultsPath = Path.Combine(GetScratchDirectory(), "results.json");
-            File.WriteAllText(resultsPath, serialized);
-            
-            Console.WriteLine(contentSize);
+            var dmitryTasks = client.GetAllDataAsync(Guid.Parse(dmitry), ct);
+            var rollingVideoTasks = client.GetAllDataAsync(Guid.Parse(rollingVideoGames), ct);
+
+            var rollingVideoResults = await rollingVideoTasks;
+            WriteResults($"{nameof(rollingVideoGames)}", rollingVideoResults, jsonSettings);
+
+            var dmitryResults = await dmitryTasks;
+            WriteResults($"{nameof(dmitry)}", dmitryResults, jsonSettings);
+
+            // var companyId = Guid.Parse(rollingVideoGames);
+            // var allPayloads = await client.GetPayloadsAsync(companyId, ct);
+            // var contentSize = allPayloads.Sum(r => r.Json.Length).ToString("N0");
+            // var serialized = JsonConvert.SerializeObject(allPayloads, jsonSettings);
+            // var resultsPath = Path.Combine(GetScratchDirectory(), "video-game-lady.json");
+            // File.WriteAllText(resultsPath, serialized);
+            //
+            // Console.WriteLine(contentSize);
+        }
+
+        private static void WriteResults(string label, ICollection<CodatPayload> results, JsonSerializerSettings jsonSettings)
+        {
+            var path = Path.Combine(GetScratchDirectory(), label + ".json");
+            var serialized = JsonConvert.SerializeObject(results, jsonSettings);
+            Console.WriteLine($"Writing {path} ({results.Sum(r => r.GzipJson.Length):N0} bytes)");
+            File.WriteAllText(path, serialized);
         }
         
         private static string GetScratchDirectory()
@@ -105,6 +122,21 @@ namespace Connector
                 DateFormatHandling = DateFormatHandling.IsoDateFormat,
                 Converters = new List<JsonConverter> { new StringEnumConverter(), },
             };
+        }
+        
+        private static ILogger<T> GetLogger<T>()
+        {
+            using var loggerFactory = LoggerFactory.Create(builder =>
+            {
+                builder
+                    .AddFilter("Microsoft", LogLevel.Warning)
+                    .AddFilter("System", LogLevel.Warning)
+                    .AddFilter("LoggingConsoleApp.Program", LogLevel.Debug)
+                    .AddConsole();
+            });
+
+            var logger = loggerFactory.CreateLogger<T>();
+            return logger;
         }
     }
 }

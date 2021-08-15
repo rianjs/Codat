@@ -1,5 +1,6 @@
 # Repo-specific ignores
 *.secret
+/Connector/data
 
 # Platform-specific ignores
 .DS_Store
