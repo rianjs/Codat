@@ -11,7 +11,8 @@ using Newtonsoft.Json;
 
 namespace Connector
 {
-    public class CodatClient : IAccountingDataReader
+    public class CodatClient :
+        IAccountingDataReader
     {
         private readonly int _lookbackMonths;
         private readonly HttpClient _codatClient;
@@ -30,47 +31,6 @@ namespace Connector
             _log = log ?? throw new ArgumentNullException(nameof(log));
             
             _companyIdsToConnectionIds = new Dictionary<Guid, Guid>();
-        }
-
-        public async Task<ICollection<CodatPayload>> GetAllDataAsync(Guid companyId, CancellationToken ct)
-        {
-            _log.LogInformation($"Beginning payload ingestion for company id {companyId}");
-            var timer = Stopwatch.StartNew();
-            var payloadTasks = new List<Task<CodatPayload>>
-            {
-                GetBalanceSheetAsync(companyId, ct),
-                GetBankAccounts(companyId, ct),
-                GetBillsAsync(companyId, ct),
-                GetChartOfAccountsAsync(companyId, ct),
-                GetCompanyInfoAsync(companyId, ct),
-                GetCreditNotesAsync(companyId, ct),
-                GetCustomersAsync(companyId, ct),
-                GetBankTransactionsAsync(companyId, ct),
-                GetInvoicesAsync(companyId, ct),
-                GetItemsAsync(companyId, ct),
-                GetPaymentsAsync(companyId, ct),
-                GetProfitAndLossAsync(companyId, ct),
-                GetJournalEntriesAsync(companyId, ct),
-                GetSuppliersAsync(companyId, ct),
-                GetBillPaymentsAsync(companyId, ct),
-                GetTaxRatesAsync(companyId, ct),
-            };
-
-            await Task.WhenAll(payloadTasks);
-            timer.Stop();
-            _log.LogInformation($"All payloads for company id {companyId} ingested in {timer.ElapsedMilliseconds:N0}ms");
-
-            var failedDownloadCount = payloadTasks.Count(t => !t.IsCompletedSuccessfully);
-            if (failedDownloadCount > 0)
-            {
-                _log.LogError($"{failedDownloadCount} payloads were not ingested");
-            }
-            
-            var results = payloadTasks
-                .Where(t => t.IsCompletedSuccessfully)
-                .Select(t => t.Result)
-                .ToList();
-            return results;
         }
 
         public async Task<CodatPayload> GetBalanceSheetAsync(Guid companyId, CancellationToken ct)
@@ -419,6 +379,7 @@ namespace Connector
             
             var separator = baseUrlSlug.Contains("?") ? "&" : "?";
             var urlSlug = $"{baseUrlSlug}{separator}pageSize={maxPageSize}&page=1";
+            var currentUrl = urlSlug;
             
             var containers = new List<T>();
             var pages = 0;
@@ -435,10 +396,11 @@ namespace Connector
                     var json = await resp.Content.ReadAsStringAsync(ct);
                     var deserialized = JsonConvert.DeserializeObject<T>(json, _jsonSettings);
                     containers.Add(deserialized);
+                    currentUrl = urlSlug;
                     urlSlug = deserialized.Links?.Next?.Link;
                 }
                 pageTimer.Stop();
-                _log.LogInformation($"Ingested page {pages} of {kind} for company id {companyId} with url {urlSlug} in {pageTimer.ElapsedMilliseconds:N0}ms");
+                _log.LogInformation($"Ingested page {pages} of {kind} for company id {companyId} with url {currentUrl} in {pageTimer.ElapsedMilliseconds:N0}ms");
             }
 
             var collector = containers.First();

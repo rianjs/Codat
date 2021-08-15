@@ -1,5 +1,4 @@
 using System;
-using System.Collections.Generic;
 using System.Threading;
 using System.Threading.Tasks;
 
@@ -7,7 +6,6 @@ namespace Connector
 {
     public interface IAccountingDataReader
     {
-        Task<ICollection<CodatPayload>> GetAllDataAsync(Guid companyId, CancellationToken ct);
         Task<CodatPayload> GetBalanceSheetAsync(Guid companyId, CancellationToken ct);
         Task<CodatPayload> GetBankAccounts(Guid companyId, CancellationToken ct);
         Task<CodatPayload> GetBillsAsync(Guid companyId, CancellationToken ct);

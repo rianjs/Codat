@@ -9,24 +9,24 @@ using Amazon.S3.Model;
 
 namespace Connector
 {
-    public class S3Client :
-        IAccountingPersistor
+    public class S3AccountingWriter :
+        IAccountingWriter
     {
         private readonly IAmazonS3 _s3;
         private readonly string _bucket;
-        private readonly ILogger<S3Client> _log;
+        private readonly ILogger<IAccountingWriter> _log;
 
-        public S3Client(IAmazonS3 s3, string accountingDataBucket, ILogger<S3Client> log)
+        public S3AccountingWriter(IAmazonS3 s3, string accountingDataBucket, ILogger<IAccountingWriter> log)
         {
             _s3 = s3 ?? throw new ArgumentNullException(nameof(s3));
             _bucket = string.IsNullOrWhiteSpace(accountingDataBucket) ? throw new ArgumentNullException(nameof(accountingDataBucket)) : accountingDataBucket;
             _log = log ?? throw new ArgumentNullException(nameof(log));
         }
 
-        public async Task SavePayloadAsync(CodatPayload payload, CancellationToken ct)
+        public async Task<bool> SavePayloadAsync(CodatPayload payload, CancellationToken ct)
         {
             var name = GetName(payload);
-            _log.LogInformation($"Writing payload {name} ({payload.Size} bytes)");
+            _log.LogInformation($"Writing payload to {_bucket}/{name} ({payload.Size} bytes)");
             
             var timer = Stopwatch.StartNew();
             PutObjectResponse resp;
@@ -45,10 +45,11 @@ namespace Connector
             if (!resp.HttpStatusCode.IsSuccessStatusCode())
             {
                 _log.LogError($"{name} was not saved successfully. Status code = {resp.HttpStatusCode}, Elapsed = {timer.ElapsedMilliseconds:N0}ms");
-                return;
+                return false;
             }
             
             _log.LogInformation($"{name} ({payload.Size} bytes) written in {timer.ElapsedMilliseconds:N0}ms");
+            return true;
         }
 
         private string GetName(CodatPayload payload)

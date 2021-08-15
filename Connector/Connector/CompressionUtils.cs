@@ -50,11 +50,14 @@ namespace Connector
 
         public static byte[] CompressBytes(byte[] data)
         {
-            using (var dest = new MemoryStream())
-            using (var gzipStream = new GZipStream(dest, CompressionMode.Compress, leaveOpen: true))
+            using (var source = new MemoryStream(data))
+            using (var destination = new MemoryStream())
             {
-                gzipStream.Write(data, 0, data.Length);
-                return dest.ToArray();
+                using (var compressor = new GZipStream(destination, CompressionMode.Compress))
+                {
+                    source.CopyTo(compressor);
+                }
+                return destination.ToArray();
             }
         }
 
